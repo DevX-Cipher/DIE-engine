@@ -30,6 +30,7 @@
 #include "dialogshortcuts.h"
 #include "dialogselectstyle.h"
 #include "xoptions.h"
+#include "xscanengine.h"
 #ifdef USE_YARA
 #include "xyara.h"
 #endif
@@ -52,6 +53,7 @@ class GuiMainWindow : public QMainWindow {
 
 public:
     GuiMainWindow(QWidget *pParent = nullptr);
+    static GuiMainWindow* instance();
     ~GuiMainWindow();
 
 private slots:
@@ -64,6 +66,12 @@ private slots:
     void on_toolButtonRecentFiles_clicked();
     void on_checkBoxAdvanced_toggled(bool bChecked);
     void on_lineEditFileName_returnPressed();
+
+    void onScanStarted();
+    void onScanFinished();
+    void updateTaskbarProgress(int value);
+    void showResultToast();
+    void onScanResult(const XScanEngine::SCAN_RESULT &result);
 
     void exitSlot();
     void openFileSlot();
@@ -83,13 +91,22 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
-
+#ifdef Q_OS_WIN
+    void changeEvent(QEvent* event) override;
+    void closeEvent(QCloseEvent *event) override;
+#endif
 private:
     Ui::GuiMainWindow *ui;
+    static GuiMainWindow* s_instance;
     XOptions g_xOptions;
+    QString m_lastScannedFile;
     XShortcuts g_xShortcuts;
+    XScanEngine::SCAN_RESULT m_lastScanResult;
+    bool m_hasScanResult = false;
     QMenu *g_pRecentFilesMenu;
     QShortcut *shortCuts[__SC_SIZE];
     bool g_bFullScreen;
+    qint32 m_nTaskbarProgress;
 };
+
 #endif  // GUIMAINWINDOW_H

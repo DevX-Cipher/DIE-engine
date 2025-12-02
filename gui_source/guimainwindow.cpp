@@ -19,13 +19,23 @@
  * SOFTWARE.
  */
 #include "guimainwindow.h"
-
 #include "ui_guimainwindow.h"
+
+GuiMainWindow* GuiMainWindow::s_instance = nullptr;
 
 GuiMainWindow::GuiMainWindow(QWidget *pParent) : QMainWindow(pParent), ui(new Ui::GuiMainWindow)
 {
     ui->setupUi(this);
+    s_instance = this;
+    DesktopIntegrationHelper::Initialize(this);
+    connect(ui->widgetFormats, SIGNAL(scanProgress(int)), this, SLOT(updateTaskbarProgress(int)));
+    connect(ui->widgetFormats, SIGNAL(scanStarted()), this, SLOT(onScanStarted()));
+    connect(ui->widgetFormats, SIGNAL(scanFinished()), this, SLOT(onScanFinished()));
 
+    connect(ui->widgetFormats,
+            SIGNAL(scanResult(const XScanEngine::SCAN_RESULT &)),
+            this,
+            SLOT(onScanResult(const XScanEngine::SCAN_RESULT &)));
     XOptions::adjustToolButton(ui->toolButtonAbout, XOptions::ICONTYPE_INFO);
     XOptions::adjustToolButton(ui->toolButtonOptions, XOptions::ICONTYPE_OPTION);
     XOptions::adjustToolButton(ui->toolButtonDemangle, XOptions::ICONTYPE_DEMANGLE);
@@ -90,6 +100,41 @@ GuiMainWindow::GuiMainWindow(QWidget *pParent) : QMainWindow(pParent), ui(new Ui
     g_xOptions.addID(XOptions::ID_SCAN_YARARULESPATH, "$data/yara_rules");
 #endif
     g_xOptions.load();
+#ifdef Q_OS_WIN
+    if (g_xOptions.getValue(XOptions::ID_FILE_ENABLETRAYMONITORING).toBool()) {
+        g_xOptions.setupTrayIconAndDownloadMonitoring(this, false);
+
+        DesktopIntegrationHelper::setCallback([this](const QString& filePath) {
+            qDebug() << "[GUI Callback] Download complete:" << filePath;
+
+            QMetaObject::invokeMethod(this, [this, filePath]() {
+                qDebug() << "[Main Thread] Received file:" << filePath;
+
+                QFileInfo checkFile(filePath);
+                if (!checkFile.exists()) {
+                    qDebug() << "[Main Thread] ✗ ERROR: File doesn't exist!";
+                    return;
+                }
+
+                qint64 fileSize = checkFile.size();
+                if (fileSize == 0) {
+                    qDebug() << "[Main Thread] ✗ ERROR: File is empty (0 bytes)!";
+                    return;
+                }
+
+                qDebug() << "[Main Thread] ✓ File is valid - Size:" << fileSize << "bytes";
+
+                m_lastScannedFile = filePath;
+                m_hasScanResult = false;
+
+                // Trigger scan
+                qDebug() << "[Main Thread] Starting scan...";
+                this->_process(filePath);
+
+            }, Qt::QueuedConnection);
+        });
+    }
+#endif
 
     g_xShortcuts.setName(X_SHORTCUTSFILE);
     g_xShortcuts.setNative(g_xOptions.isNative(), g_xOptions.getApplicationDataPath());
@@ -131,13 +176,17 @@ GuiMainWindow::GuiMainWindow(QWidget *pParent) : QMainWindow(pParent), ui(new Ui
     }
 }
 
+GuiMainWindow* GuiMainWindow::instance() {
+    return s_instance;
+}
+
 GuiMainWindow::~GuiMainWindow()
 {
-    g_xOptions.setValue(XOptions::ID_VIEW_ADVANCED, ui->checkBoxAdvanced->isChecked());
+    s_instance = nullptr;  // ADD THIS LINE
 
+    g_xOptions.setValue(XOptions::ID_VIEW_ADVANCED, ui->checkBoxAdvanced->isChecked());
     g_xOptions.save();
     g_xShortcuts.save();
-
     delete ui;
 #ifdef USE_YARA
     XYara::finalize();
@@ -231,8 +280,13 @@ void GuiMainWindow::errorMessageSlot(const QString &sText)
 void GuiMainWindow::_process(const QString &sName)
 {
     if (sName != "") {
+        qDebug() << "[_process] Starting process for:" << sName;
         ui->lineEditFileName->setText(QDir().toNativeSeparators(sName));
 
+        m_lastScannedFile = sName;  // Move this BEFORE setFileName
+        m_hasScanResult = false;    // Reset flag
+
+        qDebug() << "[_process] About to call setFileName with scan=" << g_xOptions.isScanAfterOpen();
         ui->widgetFormats->setFileName(sName, g_xOptions.isScanAfterOpen());
 
         adjustFile();
@@ -328,3 +382,157 @@ void GuiMainWindow::fullScreenSlot()
         showNormal();
     }
 }
+
+void GuiMainWindow::updateTaskbarProgress(int value)
+{
+    if (value < m_nTaskbarProgress || value > 99) return;
+
+    const int maxStep = 5;
+    if ((value - m_nTaskbarProgress) > maxStep) {
+        value = m_nTaskbarProgress + maxStep;
+    }
+
+    m_nTaskbarProgress = value;
+
+#ifdef Q_OS_WIN
+    if (DesktopIntegrationHelper::IsAvailable()) {
+        DesktopIntegrationHelper::SetProgressValue(m_nTaskbarProgress, 100);
+    }
+#endif
+}
+
+void GuiMainWindow::onScanStarted()
+{
+    m_nTaskbarProgress = 0;
+
+#ifdef Q_OS_WIN
+    if (DesktopIntegrationHelper::IsAvailable()) {
+        DesktopIntegrationHelper::SetProgressState(TBPF_NORMAL);
+        DesktopIntegrationHelper::SetProgressValue(0, 100);
+    }
+#endif
+}
+
+// In guimainwindow.cpp:
+void GuiMainWindow::onScanResult(const XScanEngine::SCAN_RESULT &result)
+{
+    m_lastScanResult = result;
+    m_hasScanResult = true;
+}
+
+
+void GuiMainWindow::showResultToast()
+{
+    qDebug() << "[Toast] Checking scan result availability...";
+    if (!m_hasScanResult) {
+        qDebug() << "[Toast] No scan result available yet";
+        return;
+    }
+
+    const auto &result = m_lastScanResult;
+
+    QString title = tr("Scan Complete");
+    QFileInfo fileInfo(result.sFileName);
+    QString body = fileInfo.fileName();
+
+    qDebug() << "[Toast] Raw scan records:";
+    for (const auto &det : result.listRecords) {
+        qDebug() << "   Name:" << det.sName
+                 << "Type:" << det.sType
+                 << "Version:" << det.sVersion
+                 << "Info:" << det.sInfo
+                 << "Protection:" << det.bIsProtection;
+
+        if (det.bIsProtection) {
+            body += QString("\nProtection: %1").arg(det.sName);
+        }
+        else if (det.sName.contains("Installer", Qt::CaseInsensitive)) {
+            body += QString("\nInstaller: %1").arg(det.sName);
+        }
+    }
+
+    qDebug() << "[Toast] Showing notification:" << title;
+    qDebug() << "[Toast] Body:" << body;
+
+    DesktopIntegrationHelper::ShowToastNotification(
+        title,
+        body,
+        QSystemTrayIcon::Information,
+        10000
+        );
+}
+
+
+
+
+void GuiMainWindow::onScanFinished()
+{
+    qDebug() << "[onScanFinished] Scan completed";
+    m_nTaskbarProgress = 100;
+
+#ifdef Q_OS_WIN
+    if (!DesktopIntegrationHelper::IsAvailable()) {
+        return;
+    }
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        QMetaObject::invokeMethod(this, [this]() { onScanFinished(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    if (isVisible()) {
+        DesktopIntegrationHelper::SetProgressValue(100, 100);
+        DesktopIntegrationHelper::SetProgressState(TBPF_NOPROGRESS);
+        DesktopIntegrationHelper::FlashTaskbar(true, 3);
+    }
+#endif
+
+    if (!m_hasScanResult) {
+        qDebug() << "[onScanFinished] Getting scan result directly from widget";
+        m_lastScanResult = ui->widgetFormats->getScanResult();
+
+        if (!m_lastScanResult.sFileName.isEmpty()) {
+            m_hasScanResult = true;
+            qDebug() << "[onScanFinished] ✓ Got scan result - Detections:" << m_lastScanResult.listRecords.size();
+
+            // Log each detection
+            for (int i = 0; i < m_lastScanResult.listRecords.size(); ++i) {
+                qDebug() << "[onScanFinished] Detection" << i << ":"
+                         << m_lastScanResult.listRecords[i].sName
+                         << m_lastScanResult.listRecords[i].sVersion;
+            }
+        } else {
+            qDebug() << "[onScanFinished] ✗ Widget result is empty";
+        }
+    }
+
+    // Schedule toast notification
+    if (!isVisible()) {
+        qDebug() << "[onScanFinished] Window hidden - scheduling toast with 1000ms delay";
+        QTimer::singleShot(1000, this, &GuiMainWindow::showResultToast);
+    } else {
+        QTimer::singleShot(500, this, &GuiMainWindow::showResultToast);
+    }
+}
+#ifdef Q_OS_WIN
+void GuiMainWindow::closeEvent(QCloseEvent* event) {
+    qDebug() << "[Debug] closeEvent triggered.";
+    if (g_xOptions.isTrayMonitoringActive()) {
+        event->ignore();        // Don’t let the window actually close
+        this->hide();           // Disappear into tray
+    } else {
+        QMainWindow::closeEvent(event);  // Proceed with default close
+    }
+}
+
+
+void GuiMainWindow::changeEvent(QEvent* event)
+{
+    if (event->type() == QEvent::WindowStateChange) {
+        if (isMinimized() && g_xOptions.isTrayMonitoringActive()) {
+            QTimer::singleShot(250, this, &GuiMainWindow::hide);  // Optional delay to smooth transition
+        }
+    }
+    QMainWindow::changeEvent(event);
+}
+
+#endif
