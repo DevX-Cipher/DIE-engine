@@ -20,9 +20,9 @@
  */
 
 #include "desktopintegrationhelper.h"
-#include "qjsonarray.h"
-#include "qnetworkaccessmanager.h"
-#include "qnetworkreply.h"
+#include "QJsonArray"
+#include "QNetworkAccessManager"
+#include "QNetworkReply"
 #include <QDebug>
 #include <QIcon>
 #include <QSystemTrayIcon>
