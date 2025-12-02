@@ -182,7 +182,7 @@ GuiMainWindow* GuiMainWindow::instance() {
 
 GuiMainWindow::~GuiMainWindow()
 {
-    s_instance = nullptr;  // ADD THIS LINE
+    s_instance = nullptr;
 
     g_xOptions.setValue(XOptions::ID_VIEW_ADVANCED, ui->checkBoxAdvanced->isChecked());
     g_xOptions.save();
