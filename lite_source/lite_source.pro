@@ -29,6 +29,12 @@ HEADERS += \
 FORMS += \
     litemainwindow.ui
 
+win32 {
+    HEADERS += $$PWD/../gui_source/desktopintegrationhelper.h
+    SOURCES += $$PWD/../gui_source/desktopintegrationhelper.cpp
+    INCLUDEPATH += $$PWD/../gui_source
+}
+
 !contains(XCONFIG, die_script) {
     XCONFIG += die_script
     include(../die_script/die_script.pri)
